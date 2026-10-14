@@ -7,10 +7,46 @@ import math
 from pathlib import Path
 import sys
 import time
+import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
 import requests
 
 NAMES = ['底座', '肩', '肘', '腕俯仰', '腕旋转', '夹爪']
+DEFAULT_URDF = Path(__file__).resolve().parent/'models/so-100.urdf'
+
+
+def forward_xyz(angles_degrees, urdf=DEFAULT_URDF):
+    """实际关节角度 -> 模型末端 link frame，底座模型参考系，单位 cm。"""
+    import numpy as np
+    if len(angles_degrees) != 6 or any(not math.isfinite(v) for v in angles_degrees):
+        raise ValueError('需要六个有限关节角度')
+    joints = ET.parse(urdf).getroot().findall('joint')[:5]
+    expected = ['Rotation', 'Pitch', 'Elbow', 'Wrist_Pitch', 'Wrist_Roll']
+    if [j.get('name') for j in joints] != expected:
+        raise ValueError('URDF 必须是当前 Phospho SO100 五轴运动链模型')
+
+    def axis_rotation(axis, angle):
+        axis = np.asarray(axis, dtype=float)
+        axis = axis / np.linalg.norm(axis)
+        x, y, z = axis
+        skew = np.array([[0,-z,y], [z,0,-x], [-y,x,0]])
+        return np.eye(3)+math.sin(angle)*skew+(1-math.cos(angle))*(skew@skew)
+
+    transform = np.eye(4)
+    # 与 Phosphobot SO100 的 AXIS_ORIENTATION=[0,0,1,1] 相同。
+    transform[:3,:3] = axis_rotation([0,0,1], math.pi/2)
+    for joint, angle in zip(joints, angles_degrees):
+        origin = joint.find('origin')
+        r, p, y = map(float, origin.get('rpy', '0 0 0').split())
+        local = np.eye(4)
+        local[:3,:3] = (axis_rotation([0,0,1],y) @ axis_rotation([0,1,0],p)
+                         @ axis_rotation([1,0,0],r))
+        local[:3,3] = list(map(float, origin.get('xyz', '0 0 0').split()))
+        transform = transform @ local
+        motion = np.eye(4)
+        motion[:3,:3] = axis_rotation(list(map(float, joint.find('axis').get('xyz').split())), math.radians(angle))
+        transform = transform @ motion
+    return (transform[:3,3]*100).tolist()
 
 
 def print_angles(start, goal, actual=None, title='六轴角度规划'):
@@ -67,10 +103,10 @@ class Client:
         self.session = requests.Session()
         self.session.trust_env = False
 
-    def call(self, endpoint, body=None, get=False):
+    def call(self, endpoint, body=None, get=False, timeout=5):
         response = self.session.request('GET' if get else 'POST', self.url+endpoint,
             params=None if get else {'robot_id': self.robot_id},
-            json=None if get else ({} if body is None else body), timeout=5)
+            json=None if get else ({} if body is None else body), timeout=timeout)
         response.raise_for_status()
         data = response.json()
         if data.get('status') == 'error':
@@ -102,6 +138,9 @@ class Client:
     def torque(self, on):
         self.call('/torque/toggle', {'torque_status': on})
 
+    def initialize(self, timeout):
+        return self.call('/move/init', {}, timeout=timeout)
+
     def close(self):
         self.session.close()
 
@@ -113,6 +152,11 @@ def main(argv=None):
     sub = parser.add_subparsers(dest='command', required=True)
     read = sub.add_parser('read', help='读取真机关节角度')
     read.add_argument('--ids', type=int, nargs='+', default=list(range(1, 7)))
+    xyz = sub.add_parser('xyz', help='读取真机关节并计算当前模型末端 XYZ（cm）')
+    xyz.add_argument('--urdf', type=Path, default=DEFAULT_URDF)
+    init = sub.add_parser('init', help='调用 Phosphobot 原生 /move/init，六轴回标定零位')
+    init.add_argument('--execute', action='store_true')
+    init.add_argument('--timeout', type=finite, default=30, help='HTTP 请求超时秒数，不是到位判定时间')
     move = sub.add_parser('move', help='按关节角度移动；默认只预览')
     move.add_argument('--ids', type=int, nargs='+', required=True)
     target = move.add_mutually_exclusive_group(required=True)
@@ -125,7 +169,7 @@ def main(argv=None):
     move.add_argument('--tolerance', type=finite, default=1, help='到位误差，单位度')
     move.add_argument('--tracking-error', type=finite, default=5, help='跟踪误差停止阈值，单位度')
     move.add_argument('--execute', action='store_true')
-    move.add_argument('--log-file', type=Path, help='执行记录 JSON 路径，默认 robot/logs/move-时间.json')
+    move.add_argument('--log-file', type=Path, help='执行记录 JSON 路径，默认 robot/垃圾文件夹/logs/move-时间.json')
     torque = sub.add_parser('torque', help='整台机械臂六轴力矩开关')
     torque.add_argument('state', choices=['on', 'off'])
     torque.add_argument('--execute', action='store_true')
@@ -138,7 +182,9 @@ def main(argv=None):
     try:
         if args.robot_id < 0:
             raise ValueError('--robot-id 必须非负')
-        if args.command != 'torque':
+        if args.command == 'init' and args.timeout <= 0:
+            raise ValueError('--timeout 必须大于 0')
+        if args.command in ('read', 'move'):
             if len(set(args.ids)) != len(args.ids) or any(i not in range(1, 7) for i in args.ids):
                 raise ValueError('--ids 必须是 1..6 内不重复的 ID')
         if args.command == 'move':
@@ -150,6 +196,29 @@ def main(argv=None):
         client = Client(args.url, args.robot_id)
         config = client.precheck()
         current = client.read()
+        if args.command == 'init':
+            print_angles(current, [0.]*6, title='Phosphobot 原生初始化：六轴标定零位，包含夹爪')
+            if not args.execute:
+                print('仅预览；未发送初始化、运动或力矩指令。加 --execute 才执行。')
+                return 0
+            # 完全交给原生接口；不附加关节插值或键盘页面的 open=1 指令。
+            try:
+                result = client.initialize(args.timeout)
+            except requests.RequestException:
+                print('初始化请求失败或超时；服务端可能已开始运动，HTTP 超时不会取消运动。', file=sys.stderr)
+                raise
+            print(f'原生 /move/init 已返回：{result}；此响应不代表真机已到位。')
+            actual = client.read()
+            print_angles(current, [0.]*6, actual, '初始化接口返回后的真实角度反馈')
+            return 0
+        if args.command == 'xyz':
+            x, y, z = forward_xyz(current, args.urdf)
+            print('当前模型末端坐标（真实关节反馈 → 正向运动学）')
+            print(f'X = {x:.3f} cm\nY = {y:.3f} cm\nZ = {z:.3f} cm')
+            print('参考系：模型底座原点，轴向与 Phosphobot SO100 模型一致。')
+            print('测量点：URDF 末端 link frame；尚未计入笔长和笔尖偏移。')
+            print('此坐标不是 /move/absolute 使用的初始化位置相对偏移。')
+            return 0
         if args.command == 'read':
             for sid in args.ids:
                 print(f'ID{sid} {NAMES[sid-1]}: {current[sid-1]:.2f}°')
@@ -180,7 +249,7 @@ def main(argv=None):
             print('仅预览；未发送运动或力矩指令。加 --execute 才执行。')
             return 0
         recorded_at = datetime.now(ZoneInfo('Asia/Shanghai'))
-        log_file = args.log_file or Path(__file__).resolve().parent/'logs'/f'move-{recorded_at:%Y%m%d-%H%M%S-%f}.json'
+        log_file = args.log_file or Path(__file__).resolve().parent/'垃圾文件夹'/'logs'/f'move-{recorded_at:%Y%m%d-%H%M%S-%f}.json'
         log_file.parent.mkdir(parents=True, exist_ok=True)
         report = {'recorded_at': recorded_at.isoformat(), 'unit': 'degrees',
                   'robot_id': args.robot_id, 'selected_ids': args.ids,

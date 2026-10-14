@@ -6,6 +6,9 @@ cd /Users/wangqibo/cs3.1/multimedia/robot2/robot
 # 读取当前六轴角度
 ./servo read
 
+# 读取当前模型末端 XYZ，单位 cm，以模型底座为参考（未计入笔尖偏移）
+./servo xyz
+
 # 读取指定关节的当前角度
 ./servo read --ids 1 2
 ```
@@ -29,11 +32,11 @@ cd /Users/wangqibo/cs3.1/multimedia/robot2/robot
 ```
 
 ```bash
-# 预览：回到保存的绘图初始姿态，夹爪保持当前位置
-./servo move --ids 1 2 3 4 5 --angles -0.7033 3.8681 1.7582 0.1758 0.1758 --speed 5 --acc 10 --timeout 60
+# 预览：Phosphobot 原生初始化，六轴回标定零位，包含夹爪
+./servo init
 
-# 执行：回到保存的绘图初始姿态，夹爪保持当前位置
-./servo move --ids 1 2 3 4 5 --angles -0.7033 3.8681 1.7582 0.1758 0.1758 --speed 5 --acc 10 --timeout 60 --execute
+# 执行：调用 /move/init，不经过脚本的角度插值规划
+./servo init --execute
 ```
 
 ```bash
