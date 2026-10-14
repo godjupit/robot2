@@ -45,12 +45,16 @@ class FeedbackClient:
 
 class Model:
     """Phosphobot 原始 SO100 URDF；独立 SciPy IK + 原始网格碰撞检查。"""
-    def __init__(self):
+    def __init__(self, tcp_offset_cm=None):
         import numpy as np
         import trimesh
         from scipy.spatial.transform import Rotation
         from trimesh.collision import CollisionManager
         self.np, self.rotation = np, Rotation
+        self.tcp_mode = tcp_offset_cm is not None
+        self.tcp_offset = np.asarray([0.,0.,0.] if tcp_offset_cm is None else tcp_offset_cm,dtype=float)/100
+        if self.tcp_offset.shape != (3,) or not np.isfinite(self.tcp_offset).all():
+            raise ValueError('TCP 偏移必须为 Fixed_Jaw 局部坐标系中的三个有限数值（cm）')
         self.root = ET.parse(ROOT/'models/so-100.urdf').getroot()
         self.joints = self.root.findall('joint')
         self.lower = np.array([float(j.find('limit').get('lower')) for j in self.joints[:5]])
@@ -93,7 +97,16 @@ class Model:
         return transforms
 
     def position(self, q):
-        return self.transforms(q,0)['Fixed_Jaw'][:3,3]
+        t = self.transforms(q,0)['Fixed_Jaw']
+        return t[:3,3]+t[:3,:3]@self.tcp_offset
+
+    def solve_position(self, target, seed):
+        """位置优先 TCP IK：XYZ 残差为 mm，不加入工具朝向约束。"""
+        from scipy.optimize import least_squares
+        np = self.np
+        return least_squares(lambda angles: np.r_[(self.position(angles)-target)*1000,
+                                                   (angles-seed)*.001],
+                             seed,bounds=(self.lower,self.upper),max_nfev=200).x
 
     def check(self, q, jaw):
         import fcl
@@ -118,10 +131,9 @@ class Model:
                 raise RuntimeError(f'模型自碰撞：{a} / {b}')
 
 
-def solve_plan(plan):
+def solve_plan(plan, model=None):
     import numpy as np
-    from scipy.optimize import least_squares
-    model = Model()
+    model = model if model is not None else Model(plan.get('tcp_offset_cm'))
     q = np.deg2rad(plan['source_joint_angles_deg'][:5])
     jaw = math.radians(plan['source_joint_angles_deg'][5])
     model.check(q,jaw)
@@ -137,14 +149,26 @@ def solve_plan(plan):
                           'ik_error_mm':0.,'max_joint_step_deg':float(np.rad2deg(abs(q)).max())})
         q=home
         targets=[('approach',plan['drawing_points_cm'][0])]+[('draw',p) for p in plan['drawing_points_cm'][1:]]
+    if model.tcp_mode:
+        # 长工具从当前姿态接近起点时，细分 XYZ，逐点检查关节跳变和碰撞。
+        expanded=[]
+        preceding=(model.position(q)*100).tolist()
+        approach=[preceding]
+        for phase,point in targets:
+            points=segment(preceding,point,1.)[1:] if phase=='approach' else [point]
+            expanded.extend((phase,p) for p in points)
+            if phase=='approach':
+                approach.extend(points)
+            preceding=point
+        targets=expanded
+        plan['approach_points_cm']=approach
     targets += [('lift',p) for p in plan.get('lift_points_cm',[])]
+    if plan.get('stroke_targets'):
+        targets=[(p['phase'],p['xyz_cm']) for p in plan['stroke_targets']]
     for index,(phase,point) in enumerate(targets):
         target = np.asarray(point)/100
         seed = q.copy()
-        result = least_squares(lambda angles: np.r_[(model.position(angles)-target)*1000,
-                                                   (angles-seed)*.001],
-                               q,bounds=(model.lower,model.upper),max_nfev=200)
-        q = result.x
+        q = model.solve_position(target,seed)
         error = float(np.linalg.norm(model.position(q)-target)*1000)
         step_deg = float(np.rad2deg(np.abs(q-seed)).max())
         # 粗采样目标之间允许较大角差，执行层仍将发送角度拆成 0.5° 小步。
@@ -155,19 +179,68 @@ def solve_plan(plan):
             model.check(seed+fraction*(q-seed),jaw)
         solutions.append({'phase':phase,'xyz_cm':point,'joint_angles_deg':np.rad2deg(q).tolist(),
                           'ik_error_mm':error,'max_joint_step_deg':step_deg})
+        if plan.get('stroke_targets'):
+            solutions[-1].update({k:v for k,v in plan['stroke_targets'][index].items() if k!='xyz_cm'})
     plan.update({'ik_validated':True,'collision_checked':True,'joint_limits_checked':True,
-                 'solver':'Independent SciPy position-only IK using Phosphobot SO100 URDF, not its PyBullet solver',
-                 'collision_scope':'Original SO100 meshes, nonadjacent self collisions and distal clearance above model Z=0. No external objects or rod/TCP modeled, per requested scope.',
-                 'orientation':'Free orientation, regularized toward preceding joint pose',
+                 'solver':'Independent SciPy position-only TCP IK' if model.tcp_mode else 'Independent SciPy position-only end-frame IK',
+                 'collision_scope':'Original SO100 meshes, nonadjacent self collisions and distal clearance above model Z=0. Rod volume and external objects are not collision modeled.',
+                 'orientation':'Free orientation; XYZ residual in mm with weak 0.001 joint continuity regularization',
                  'solutions':solutions})
     return model
+
+
+def choose_drawing_compensation(model, actual, command, error, goal_xyz, mask,
+                                paper_z_cm, step_deg=.5, shoulder_step_deg=1., elbow_step_deg=1.,
+                                z_below_tolerance_mm=0.):
+    """每轮只增加一个轴的目标，预测各轴不同步时的 Z，优先安全的 XYZ 改善。"""
+    from itertools import product
+    np=model.np
+    actual=np.asarray(actual[:5],dtype=float)
+    command=np.asarray(command,dtype=float)
+    current=model.position(np.deg2rad(actual))*100
+    # 候选预测和实测保护使用同一个纸面下方阈值，不额外强制 Z>=纸面。
+    floor=paper_z_cm-z_below_tolerance_mm/10
+    candidates=[]
+    for joint in np.flatnonzero(mask):
+        limit=shoulder_step_deg if joint==1 else elbow_step_deg if joint==2 else step_deg
+        delta=float(np.clip(error[joint],-limit,limit))
+        for scale in (1.,.5,.25):
+            proposed=command.copy();proposed[joint]+=delta*scale
+            # 使用真实角度到所有待执行发送目标的组合，而非假设五轴同步。
+            z_values=[]
+            for bits in product((0,1),repeat=5):
+                q=np.where(bits,proposed,actual)
+                z_values.append(float(model.position(np.deg2rad(q))[2]*100))
+            # 有限模型采样不代表真实运动保证。
+            for fraction in np.linspace(0,1,11):
+                q=actual+fraction*(proposed-actual)
+                z_values.append(float(model.position(np.deg2rad(q))[2]*100))
+            predicted=actual.copy();predicted[joint]+=delta*scale
+            xyz=model.position(np.deg2rad(predicted))*100
+            minimum=min(z_values)
+            if minimum < floor-1e-9:
+                continue
+            improvement=float(np.linalg.norm(current-goal_xyz)-np.linalg.norm(xyz-goal_xyz))
+            rise=float(xyz[2]-current[2])
+            if improvement <= 1e-9 and rise <= 1e-9:
+                continue
+            rank=(rise,improvement) if current[2]-paper_z_cm < .2 else (improvement,rise)
+            candidates.append((rank,proposed,joint,xyz,minimum))
+            break
+    if not candidates:
+        raise RuntimeError('绘图补偿预检：没有可改善位置且满足 Z 阈值的单轴调整，停止整条轨迹')
+    _,proposed,joint,xyz,minimum=max(candidates,key=lambda item:item[0])
+    return proposed,{'joint_id':int(joint)+1,'joint_name':NAMES[joint],
+                     'predicted_next_xyz_cm':xyz.tolist(),
+                     'predicted_min_z_cm':minimum,'prediction_floor_z_cm':floor}
 
 
 def move_point_with_compensation(client, model, point, command, write_arm, record,
                                  deadline, joint_tolerance=2., xyz_tolerance_mm=10.,
                                  point_timeout=60., max_compensation=15., step_deg=.5,
-                                 interval=.25):
-    """每个目标点独立闭环；固定期望角度，每次最多修正 0.5° 的发送角度。"""
+                                 interval=.25, paper_z_cm=None, z_below_tolerance_mm=5.,
+                                 shoulder_step_deg=1., elbow_step_deg=1.):
+    """逐点闭环；肩和肘每次最多 1°，其余运动关节每次最多 0.5°。"""
     np = model.np
     goal = np.asarray(point['joint_angles_deg'],dtype=float)
     goal_xyz = np.asarray(point['xyz_cm'],dtype=float)
@@ -194,8 +267,22 @@ def move_point_with_compensation(client, model, point, command, write_arm, recor
                   'position_error_mm':position_error_mm}
         if getattr(client,'last_ticks',None) is not None:
             sample['motor_position_units']=client.last_ticks.copy()
-        record(sample)
-        arrived = max(abs(error)) <= joint_tolerance and position_error_mm <= xyz_tolerance_mm
+        if model.tcp_mode and point['phase'] in ('draw','lower'):
+            paper_z = goal_xyz[2] if paper_z_cm is None else paper_z_cm
+            below_mm = (paper_z-float(xyz[2]))*10
+            sample['below_paper_mm']=below_mm
+        saved_sample=record(sample)
+        # 绘图段高度保护先于到位判断，不受 XYZ 到位容差影响。
+        if model.tcp_mode and point['phase'] in ('draw','lower'):
+            if below_mm > z_below_tolerance_mm:
+                raise RuntimeError(f'绘图 Z 高度保护：TCP Z={xyz[2]:.4f} cm，'
+                                   f'低于纸面 Z={paper_z:g} cm {below_mm:.2f} mm，'
+                                   f'超过允许 {z_below_tolerance_mm:g} mm，停止整条轨迹')
+        if 'min_z_cm' in point and xyz[2] < point['min_z_cm']:
+            raise RuntimeError(f'抬笔转移高度保护：TCP Z={xyz[2]:.4f} cm，低于要求 {point["min_z_cm"]:g} cm，停止整条轨迹')
+        # TCP 绘图只要求尖端 XYZ；回零仍要求五轴角度到位。
+        position_only = model.tcp_mode and point['phase'] != 'home'
+        arrived = position_error_mm <= xyz_tolerance_mm and (position_only or max(abs(error)) <= joint_tolerance)
         stable = stable+1 if arrived else 0
         if stable >= 2:
             return command,sample
@@ -216,7 +303,20 @@ def move_point_with_compensation(client, model, point, command, write_arm, recor
             raise RuntimeError('连续 8 次反馈未变化且未到位，停止补偿')
         # 只根据实际残差调整，不把“发送成功”当成到位。
         mask = abs(error) > (.1 if position_error_mm > xyz_tolerance_mm else joint_tolerance)
-        proposed = command+np.where(mask,np.clip(error,-step_deg,step_deg),0.)
+        if model.tcp_mode and point['phase'] in ('draw','lower'):
+            proposed,choice=choose_drawing_compensation(model,actual,command,error,goal_xyz,mask,paper_z,step_deg,shoulder_step_deg,elbow_step_deg,z_below_tolerance_mm)
+            sample['compensation_choice']=choice
+            if isinstance(saved_sample,dict):
+                saved_sample['compensation_choice']=choice.copy()
+            mask=abs(proposed-command)>1e-12
+            if iteration % 10 == 0:
+                print(f'    Z 预测选择 ID{choice["joint_id"]}（{choice["joint_name"]}）：'
+                      f'当前 Z={xyz[2]:.4f} cm，预计单轴调整后 Z={choice["predicted_next_xyz_cm"][2]:.4f} cm，'
+                      f'待执行角度组合最低 Z={choice["predicted_min_z_cm"]:.4f} cm，'
+                      f'保护下限 Z={choice["prediction_floor_z_cm"]:.4f} cm',flush=True)
+        else:
+            limits=np.full(5,step_deg);limits[1]=shoulder_step_deg;limits[2]=elbow_step_deg
+            proposed = command+np.where(mask,np.clip(error,-limits,limits),0.)
         if np.any(proposed < lower_command) or np.any(proposed > upper_command):
             raise RuntimeError('当前点补偿超出起始/目标范围外 15° 的上限')
         if max(abs(proposed-np.asarray(actual[:5]))) > max_compensation+3:
@@ -235,7 +335,7 @@ def move_point_with_compensation(client, model, point, command, write_arm, recor
 
 
 def execute_plan(client, model, plan, config, destination, joint_tolerance=2.,
-                 xyz_tolerance_mm=10., point_timeout=60.):
+                 xyz_tolerance_mm=10., point_timeout=60., total_timeout=360.):
     """按粗采样目标逐点反馈补偿，记录规划/发送/实测；不发送夹爪目标。"""
     import csv
     np = model.np
@@ -243,13 +343,25 @@ def execute_plan(client, model, plan, config, destination, joint_tolerance=2.,
     seed = plan['source_joint_angles_deg']
     if max(abs(a-b) for a,b in zip(initial,seed)) > .5:
         raise RuntimeError('真机姿态已偏离规划起点，未发送运动')
+    settings=plan.get('execution_settings',{})
+    steps=settings.get('control_step_deg_by_joint',[.5,1.,1.,.5,.5])
+    if len(steps)!=5 or any(not math.isfinite(v) or not 0<v<=1 for v in steps) or steps[0]!=steps[3] or steps[0]!=steps[4]:
+        raise ValueError('每轴补偿步长配置无效，未发送运动')
     result = {'motion_sent':False,'status':'running','samples':[],'commands':[],
               'completed_points':0,'waypoint_results':[],
+              'completed_strokes':0,
               'line_completed':False,'lift_completed':False,
+              'reference_point':plan.get('reference_point'),
+              'tcp_offset_cm':plan.get('tcp_offset_cm'),
+              'arrival_mode':'TCP XYZ only; home also checks joint angles' if model.tcp_mode else 'joint angles and end-frame XYZ',
               'planning_file':str(destination.resolve()),
               'arrival_joint_tolerance_deg':joint_tolerance,
               'arrival_xyz_tolerance_mm':xyz_tolerance_mm,
-              'point_timeout_s':point_timeout,'control_step_deg':.5,
+              'drawing_z_protection':plan.get('drawing_z_protection'),
+              'drawing_compensation':'One changed joint target per round; FK prediction of pending joint combinations; lift priority within 2 mm of paper',
+              'point_timeout_s':point_timeout,'control_step_deg':steps[0],
+              'control_step_deg_by_joint':steps,
+              'total_timeout_s':total_timeout,
               'feedback_interval_s':.25,'max_compensation_deg':15.}
     result['execution_api'] = 'POST /joints/write, first five angles in radians, no joints_ids; no gripper write'
     log = destination.parent/'execution.json'
@@ -281,20 +393,35 @@ def execute_plan(client, model, plan, config, destination, joint_tolerance=2.,
             raise RuntimeError('补偿后的发送目标超出角度/编码器限位')
         result['motion_sent'] = True
         client.call('/joints/write',{'unit':'rad','angles':np.deg2rad(values).tolist()})
-        result['commands'].append({'time_s':time.monotonic()-started,'angles_deg':values.tolist()})
+        entry={'time_s':time.monotonic()-started,'angles_deg':values.tolist()}
+        if result['status']=='running' and result['samples']:
+            choice=result['samples'][-1].get('compensation_choice')
+            if choice is not None:
+                entry['compensation_choice']=choice.copy()
+        result['commands'].append(entry)
     try:
         for index,point in enumerate(plan['solutions']):
             print(f'目标 {index+1}/{len(plan["solutions"])}: XYZ={np.round(point["xyz_cm"],3).tolist()} cm；'
-                  f'规划角度={np.round(point["joint_angles_deg"],2).tolist()}°',flush=True)
+                  f'规划角度={np.round(point["joint_angles_deg"],2).tolist()}°；'
+                  f'阶段={point["phase"]}'+(f'，第 {point["stroke_id"]} 笔' if 'stroke_id' in point else ''),flush=True)
             def record(sample):
                 row={'time_s':time.monotonic()-started,'point':index+1,'phase':point['phase'],**sample}
+                if 'stroke_id' in point:
+                    row['stroke_id']=point['stroke_id']
                 result['samples'].append(row)
                 result['last_actual_angles']=sample['actual_angles_deg'].copy()
                 stream.write(json.dumps(row,ensure_ascii=False)+'\n');stream.flush()
+                return row
             command,actual = move_point_with_compensation(
-                client,model,point,command,write_arm,record,started+360,
-                joint_tolerance,xyz_tolerance_mm,point_timeout)
+                client,model,point,command,write_arm,record,started+total_timeout,
+                joint_tolerance,xyz_tolerance_mm,point_timeout,
+                step_deg=steps[0],shoulder_step_deg=steps[1],elbow_step_deg=steps[2],
+                paper_z_cm=plan.get('drawing_z_protection',{}).get('paper_z_cm'),
+                z_below_tolerance_mm=plan.get('drawing_z_protection',{}).get('z_below_tolerance_mm',5.))
             result['completed_points']=index+1
+            if point.get('stroke_finished'):
+                result['completed_strokes']+=1
+                print(f'第 {point["stroke_id"]} 笔完成并抬笔到位。',flush=True)
             if point['phase']=='draw' and math.dist(point['xyz_cm'],plan['line_end_cm']) < 1e-8:
                 result['line_completed']=True
             if point['phase']=='lift':
@@ -333,7 +460,7 @@ def execute_plan(client, model, plan, config, destination, joint_tolerance=2.,
 
 def segment(start, end, spacing_cm):
     distance = math.dist(start, end)
-    steps = max(1, math.ceil(distance/spacing_cm))
+    steps = max(1, math.ceil(distance/spacing_cm-1e-12))
     return [[a+(b-a)*i/steps for a,b in zip(start,end)] for i in range(steps+1)]
 
 
@@ -349,6 +476,15 @@ def insert_line_points(plan, count):
     plan['max_spacing_cm']=math.dist(start,end)/(count+1)
     # 该清单只用于参考；执行使用完整求解后的关节请求。
     plan['phosphobot_requests']=[]
+
+
+def resample_replay_points(plan, spacing_cm):
+    """按距离重新采样直线，保留起终点。"""
+    sampled=segment(plan['line_start_cm'],plan['line_end_cm'],spacing_cm)
+    plan.update(drawing_points_cm=sampled,drawing_point_count=len(sampled),
+                sampling_mode='dense_spacing',
+                max_spacing_cm=max(math.dist(a,b) for a,b in zip(sampled,sampled[1:])),
+                phosphobot_requests=[])
 
 
 def add_final_lift(plan, lift_cm):
@@ -450,7 +586,8 @@ def save_execution_preview(plan, result, path):
     side.axhline(plan['line_z_cm'],linestyle='--',color='#2563eb',label='Requested plane')
     side.set(xlabel='Time (s)',ylabel='Z (cm)',title='Height during approach and coarse motion')
     side.legend(fontsize=8);side.grid(alpha=.25)
-    fig.suptitle('REAL joint feedback + URDF end frame; tool tip not measured',fontsize=11)
+    fig.suptitle('REAL joint feedback + modeled TCP; tool tip not measured' if plan.get('tcp_offset_cm') is not None
+                 else 'REAL joint feedback + URDF end frame; tool tip not measured',fontsize=11)
     fig.tight_layout();fig.savefig(path,dpi=150);plt.close(fig)
 
 
@@ -458,6 +595,11 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--url',default='http://127.0.0.1:80')
     parser.add_argument('--robot-id',type=int,default=0)
+    tool=parser.add_mutually_exclusive_group()
+    tool.add_argument('--tcp-offset-cm',nargs=3,type=finite,metavar=('X','Y','Z'),
+                        help='启用 Position-only TCP IK：棍尖在 Fixed_Jaw 局部坐标系中的偏移，cm；不约束朝向')
+    tool.add_argument('--rod-length-cm',type=finite,
+                      help='启用 TCP IK：从 Fixed_Jaw 原点沿夹爪局部 -Y 向前延伸的长度，cm')
     parser.add_argument('--z',type=finite,default=15,help='模型底座参考系 Z，cm')
     parser.add_argument('--length',type=finite,default=10,help='线长 cm')
     parser.add_argument('--axis',choices=['x','y'],default='x')
@@ -468,14 +610,22 @@ def main():
     sampling.add_argument('--insert-points',type=int,help='在起终点之间均匀插入几个点，例如 5 对应共 7 个点')
     parser.add_argument('--lift-cm',type=finite,default=0,help='线完成后在终点上抬的高度 cm，默认不抬')
     parser.add_argument('--joint-tolerance',type=finite,default=2,help='到位关节误差，度，默认 2')
-    parser.add_argument('--xyz-tolerance-mm',type=finite,default=10,help='到位模型末端误差，mm，默认 10')
+    parser.add_argument('--xyz-tolerance-mm',type=finite,default=10,help='到位模型 TCP/末端误差，mm，默认 10')
+    parser.add_argument('--paper-z-cm',type=finite,help='绘图 Z 保护的纸面高度，cm，默认使用绘图路径 Z')
+    parser.add_argument('--z-below-tolerance-mm',type=finite,default=5,
+                        help='TCP 绘图段低于纸面的允许量，mm，默认 5；超过后停止补偿')
     parser.add_argument('--point-timeout',type=finite,default=60,help='每个目标点补偿超时秒数')
+    parser.add_argument('--joint-step-deg',type=finite,help='统一覆盖五轴每轮最大补偿角度，例如 0.5；默认肩/肘 1，其余 0.5')
     parser.add_argument('--replay',type=Path,help='重走已有 planning.json 中的三个目标位置')
     parser.add_argument('--return-home',action='store_true',help='路径前增加五个运动关节回零，夹爪不动')
     parser.add_argument('--output',type=Path,default=ROOT/'垃圾文件夹/plans')
     parser.add_argument('--solve',action='store_true',help='离线求 IK 并检查原始模型自碰撞/限位')
     parser.add_argument('--execute',action='store_true',help='完整求解预检通过后执行，并检查真实反馈')
     args=parser.parse_args()
+    if args.rod_length_cm is not None:
+        if args.rod_length_cm <= 0:
+            parser.error('rod-length-cm 必须大于零')
+        args.tcp_offset_cm=[0.,-args.rod_length_cm,0.]
     if args.robot_id < 0 or args.length <= 0 or (args.spacing is not None and args.spacing <= 0):
         parser.error('robot-id 必须非负，length 和 spacing 必须大于零')
     if not 2 <= args.points <= 1000:
@@ -484,6 +634,10 @@ def main():
         parser.error('insert-points 范围 0..998')
     if not 0 <= args.lift_cm <= 10:
         parser.error('lift-cm 范围 0..10 cm')
+    if not 0 <= args.z_below_tolerance_mm <= 5:
+        parser.error('z-below-tolerance-mm 范围 0..5 mm')
+    if args.joint_step_deg is not None and not 0<args.joint_step_deg<=1:
+        parser.error('joint-step-deg 范围大于 0 且不超过 1°')
     if not .1 <= args.joint_tolerance <= 5 or not 1 <= args.xyz_tolerance_mm <= 20 or not 1 <= args.point_timeout <= 120:
         parser.error('joint-tolerance 范围 0.1..5°，xyz-tolerance-mm 范围 1..20 mm，point-timeout 范围 1..120 秒')
     client=Client(args.url,args.robot_id)
@@ -496,7 +650,8 @@ def main():
         angles=FeedbackClient(client,config).read()
     finally:
         client.close()
-    current=forward_xyz(angles)
+    tcp_model=Model(args.tcp_offset_cm) if args.tcp_offset_cm is not None else None
+    current=(tcp_model.position(tcp_model.np.deg2rad(angles[:5]))*100).tolist() if tcp_model is not None else forward_xyz(angles)
     plan=build_plan(current,args.z,args.length,args.axis,args.direction,
                     args.spacing if args.spacing is not None else .2,
                     None if args.spacing is not None else args.points)
@@ -523,13 +678,24 @@ def main():
                 plan['initial_command_source']=str(prior_log.resolve())
     if args.insert_points is not None:
         insert_line_points(plan,args.insert_points)
+    elif args.replay and args.spacing is not None:
+        resample_replay_points(plan,args.spacing)
     add_final_lift(plan,args.lift_cm)
     plan['return_home']=args.return_home
     if args.return_home:
-        home_xyz=forward_xyz([0.,0.,0.,0.,0.,angles[5]])
+        home_xyz=(tcp_model.position(tcp_model.np.zeros(5))*100).tolist() if tcp_model is not None else forward_xyz([0.,0.,0.,0.,0.,angles[5]])
         plan['approach_points_cm']=[current,home_xyz,plan['drawing_points_cm'][0]]
     plan['recorded_at']=datetime.now(ZoneInfo('Asia/Shanghai')).isoformat()
     plan['source_joint_angles_deg']=angles
+    plan['tcp_offset_cm']=args.tcp_offset_cm
+    if tcp_model is not None:
+        plan['drawing_z_protection']={'scope':'draw phase only',
+            'paper_z_cm':plan['line_z_cm'] if args.paper_z_cm is None else args.paper_z_cm,
+            'z_below_tolerance_mm':args.z_below_tolerance_mm}
+    if tcp_model is not None:
+        plan['reference_point']='Rod tip TCP attached to Fixed_Jaw; position-only, free orientation'
+        plan['tcp_offset_frame']='Fixed_Jaw local frame; offset in cm'
+    plan['arrival_mode']='TCP XYZ only; home also checks joint angles' if tcp_model is not None else 'joint angles and end-frame XYZ'
     plan['robot_id']=args.robot_id
     plan['service_url']=args.url
     plan['phosphobot_version']=api.get('info',{}).get('version')
@@ -539,6 +705,12 @@ def main():
                                 'xyz_tolerance_mm':args.xyz_tolerance_mm,
                                 'point_timeout_s':args.point_timeout,
                                 'control_step_deg':.5,'feedback_interval_s':.25}
+    plan['execution_settings']['control_step_deg_by_joint']=[.5,1.,1.,.5,.5]
+    if args.joint_step_deg is not None:
+        plan['execution_settings']['control_step_deg']=args.joint_step_deg
+        plan['execution_settings']['control_step_deg_by_joint']=[args.joint_step_deg]*5
+    if tcp_model is not None:
+        plan['execution_settings']['drawing_compensation']='One changed joint target per round; pending-joint FK height screening; lift priority within 2 mm of paper'
     for request in plan['phosphobot_requests']:
         request['query']={'robot_id':args.robot_id}
     run_dir=args.output/f'line-{datetime.now(ZoneInfo("Asia/Shanghai")):%Y%m%d-%H%M%S-%f}'
@@ -547,14 +719,19 @@ def main():
     destination.write_text(json.dumps(plan,ensure_ascii=False,indent=2)+'\n')
     model=None
     try:
-        model=solve_plan(plan) if args.solve or args.execute else None
+        model=solve_plan(plan,tcp_model) if args.solve or args.execute else None
     except Exception as exc:
         plan['precheck_error']=str(exc)
         destination.write_text(json.dumps(plan,ensure_ascii=False,indent=2)+'\n')
         raise
     destination.write_text(json.dumps(plan,ensure_ascii=False,indent=2)+'\n')
     save_preview(plan,run_dir/'planning.png')
-    print('当前模型末端 XYZ（cm）：',[round(v,3) for v in current])
+    print('当前棍尖 TCP XYZ（cm）：' if tcp_model is not None else '当前模型末端 XYZ（cm）：',[round(v,3) for v in current])
+    if tcp_model is not None:
+        print('TCP 偏移（Fixed_Jaw 局部坐标，cm）：',args.tcp_offset_cm)
+        protection=plan['drawing_z_protection']
+        print(f'绘图 Z 保护：低于纸面 Z={protection["paper_z_cm"]:g} cm '
+              f'超过 {protection["z_below_tolerance_mm"]:g} mm 就停止补偿。')
     print('直线起点（cm）：',[round(v,3) for v in plan['line_start_cm']])
     print('直线终点（cm）：',[round(v,3) for v in plan['line_end_cm']])
     print(f'线长 {plan["line_length_cm"]:.3f} cm，目标 Z={plan["line_z_cm"]:g} cm，绘图点 {len(plan["drawing_points_cm"])} 个')
@@ -562,7 +739,10 @@ def main():
         print('线完成后抬笔目标（模型末端 cm）：',plan['lift_points_cm'][-1])
     print('路径及原生 API 请求清单：',destination)
     print('预览图：',run_dir/'planning.png')
-    print(f'到位条件：关节误差≤{args.joint_tolerance:g}°，XYZ误差≤{args.xyz_tolerance_mm:g} mm，连续两次满足。')
+    if tcp_model is not None:
+        print(f'到位条件：棍尖 TCP XYZ误差≤{args.xyz_tolerance_mm:g} mm，连续两次满足；不约束朝向。回零另检查关节误差≤{args.joint_tolerance:g}°。')
+    else:
+        print(f'到位条件：关节误差≤{args.joint_tolerance:g}°，XYZ误差≤{args.xyz_tolerance_mm:g} mm，连续两次满足。')
     if model is None:
         print('仅规划，未调用任何移动接口；无独立规划 API，尚未验证 IK、关节限位或碰撞。')
     else:
