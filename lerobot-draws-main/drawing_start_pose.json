@@ -1,0 +1,92 @@
+{
+  "description": "User-selected drawing start pose; not paper contact or calibration zero",
+  "recorded_at": "2026-10-14T14:59:48.500706+08:00",
+  "robot_id": 0,
+  "unit": "rad",
+  "angles": [
+    -0.01227484309094913,
+    0.06751163700022023,
+    0.030687107727372827,
+    0.0030687107727372827,
+    0.0030687107727372827,
+    2.011539911529289
+  ],
+  "angles_degrees": [
+    -0.7032967032967032,
+    3.8681318681318686,
+    1.7582417582417582,
+    0.1758241758241758,
+    0.1758241758241758,
+    115.25274725274726
+  ],
+  "controlled_joint_ids": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "gripper": "Recorded for reference only; do not reset gripper during start-pose verification",
+  "calibration": {
+    "name": "so-100",
+    "servos_voltage": 12.0,
+    "servos_offsets": [
+      2048.0,
+      2048.0,
+      2048.0,
+      2048.0,
+      2048.0,
+      2048.0
+    ],
+    "servos_calibration_position": [
+      929.0,
+      3206.0,
+      954.0,
+      906.0,
+      1937.0,
+      3367.0
+    ],
+    "servos_offsets_signs": [
+      -1.0,
+      1.0,
+      1.0,
+      1.0,
+      -1.0,
+      1.0
+    ],
+    "pid_gains": [
+      {
+        "p_gain": 6.0,
+        "i_gain": 0.0,
+        "d_gain": 30.0
+      },
+      {
+        "p_gain": 6.0,
+        "i_gain": 0.1,
+        "d_gain": 15.0
+      },
+      {
+        "p_gain": 6.0,
+        "i_gain": 0.1,
+        "d_gain": 15.0
+      },
+      {
+        "p_gain": 10.0,
+        "i_gain": 0.0,
+        "d_gain": 30.0
+      },
+      {
+        "p_gain": 15.0,
+        "i_gain": 0.0,
+        "d_gain": 30.0
+      },
+      {
+        "p_gain": 10.0,
+        "i_gain": 0.0,
+        "d_gain": 32.0
+      }
+    ],
+    "gripping_threshold": 80,
+    "non_gripping_threshold": 10
+  }
+}

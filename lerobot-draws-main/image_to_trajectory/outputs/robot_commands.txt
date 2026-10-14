@@ -1,0 +1,20 @@
+# Robot drawing commands
+# Generated from image processing pipeline
+
+# Path 1
+MOVE 99.4 179.9 0
+PEN_DOWN
+DRAW 14.6 122.7 0
+DRAW 14.6 121.7 0
+DRAW 19.3 115.6 0
+DRAW 20.5 115.8 0
+DRAW 27.3 120.1 0
+DRAW 27.7 21.1 0
+DRAW 172.3 21.3 0
+DRAW 172.5 120.3 0
+DRAW 180.1 115.2 0
+DRAW 180.9 115.2 0
+DRAW 185.4 121.3 0
+DRAW 185.5 122.5 0
+DRAW 100.2 179.9 0
+PEN_UP

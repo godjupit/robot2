@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Robot Control Interface</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="w-[1000px] bg-gray-100 mx-auto my-4">
+  <!-- Header & action buttons -->
+  <h1 class="text-3xl font-bold underline">So-100 Control Center 🎉</h1>
+  <p>Here you can see all important information about our robot</p>
+
+  <h1 class="text-3xl font-bold underline mt-8">Our Robot actions we want to call 🤖</h1>
+  <ul class="flex flex-col gap-2 mt-4">
+    <li><button id="voice-to-prompt" class="bg-blue-500 text-white p-2 rounded-md">Voice to prompt</button></li>
+    <li><button id="respond-to-user" class="bg-blue-500 text-white p-2 rounded-md">Respond to user</button></li>
+    <li><button id="draw-object" class="bg-blue-500 text-white p-2 rounded-md">Draw a object</button></li>
+    <li><button id="erase-board" class="bg-blue-500 text-white p-2 rounded-md">Erase the board</button></li>
+  </ul>
+
+  <!-- Voice-recording UI -->
+  <h1 class="text-3xl font-bold underline mt-8">Control with your voice 💬🎙️</h1>
+
+  <div class="p-4 rounded-lg bg-white shadow mt-4" id="voiceBox">
+    <!-- Name / Rename -->
+    <label class="block text-sm font-medium text-gray-700 mb-1">Recording name</label>
+    <input
+      id="recordingName"
+      class="w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 mb-4"
+      placeholder="e.g. hello-world"
+    />
+
+    <!-- Record / Stop -->
+    <div class="flex gap-2 mb-4">
+      <button id="startBtn" class="bg-green-500 text-white p-2 rounded-md disabled:opacity-40">Start</button>
+      <button id="stopBtn"  class="bg-red-500 text-white p-2 rounded-md disabled:opacity-40" disabled>Stop</button>
+    </div>
+  </div>
+
+  <!-- List of finished recordings -->
+  <ul id="recordingsList" class="space-y-3 mt-6"></ul>
+
+  <!-- Script -->
+  <script>
+  /* Front-end logic */
+  const startBtn   = document.getElementById('startBtn');
+  const stopBtn    = document.getElementById('stopBtn');
+  const nameInput  = document.getElementById('recordingName');
+  const listBox    = document.getElementById('recordingsList');
+
+
+  
+
+  let mediaRecorder;
+  let chunks = [];
+  const recordings = []; // {id, name, blob, url, transcription, responseUrl, imageUrl}
+
+  function renderList() {
+    listBox.innerHTML = '';
+    recordings.forEach(rec => {
+      const li = document.createElement('li');
+      li.className = 'flex flex-col gap-2 p-4 rounded-lg bg-gray-50 shadow';
+
+      const nameField = document.createElement('input');
+      nameField.value = rec.name;
+      nameField.className = 'w-full rounded border-gray-300 p-1 text-sm';
+      nameField.addEventListener('input', e => {
+        rec.name = e.target.value.trim();
+      });
+
+      const audio = document.createElement('audio');
+      audio.controls = true;
+      audio.src = rec.url;
+      audio.className = 'w-full';
+
+      // Transcription display
+      const transcriptionDiv = document.createElement('div');
+      transcriptionDiv.className = 'text-sm text-gray-700';
+      transcriptionDiv.textContent = rec.transcription ? `Transcription: ${rec.transcription}` : 'No transcription yet';
+
+      // Image display
+      const imageElement = document.createElement('img');
+      if (rec.imageUrl) {
+        imageElement.src = rec.imageUrl;
+        imageElement.className = 'w-full max-w-[300px] mt-2 rounded';
+        imageElement.alt = 'Generated image';
+      }
+
+      // Response audio
+      const responseAudio = document.createElement('audio');
+      responseAudio.controls = true;
+      responseAudio.className = 'w-full';
+      if (rec.responseUrl) {
+        responseAudio.src = rec.responseUrl;
+      }
+
+      const bar = document.createElement('div');
+      bar.className = 'flex gap-2 mt-2';
+
+      const delBtn = document.createElement('button');
+      delBtn.textContent = 'Delete';
+      delBtn.className = 'bg-red-500 text-white p-2 rounded-md';
+      delBtn.onclick = () => {
+        URL.revokeObjectURL(rec.url);
+        if (rec.responseUrl) URL.revokeObjectURL(rec.responseUrl);
+        const idx = recordings.findIndex(r => r.id === rec.id);
+        recordings.splice(idx, 1);
+        renderList();
+      };
+
+      const execBtn = document.createElement('button');
+      execBtn.textContent = 'Execute';
+      execBtn.className = 'bg-blue-600 text-white p-2 rounded-md';
+      execBtn.onclick = () => uploadRecording(rec);
+
+      bar.append(delBtn, execBtn);
+      li.append(nameField, audio, transcriptionDiv, imageElement, responseAudio, bar);
+      listBox.append(li);
+    });
+  }
+
+  function resetUI() {
+    nameInput.value = '';
+    nameInput.disabled = false;
+    startBtn.disabled = true;
+    stopBtn.disabled = true;
+  }
+
+  /* Enable start only if name typed */
+  nameInput.addEventListener('input', () => {
+    startBtn.disabled = !nameInput.value.trim();
+  });
+
+  /* Start recording */
+  startBtn.addEventListener('click', async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      chunks = [];
+
+      mediaRecorder.ondataavailable = e => chunks.push(e.data);
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        const url = URL.createObjectURL(blob);
+        recordings.push({
+          id: crypto.randomUUID(),
+          name: nameInput.value.trim(),
+          blob,
+          url,
+          transcription: '',
+          responseUrl: '',
+          imageUrl: ''
+        });
+        renderList();
+        resetUI();
+      };
+
+      mediaRecorder.start();
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+      nameInput.disabled = true;
+    } catch (err) {
+      console.error(err);
+      alert('Microphone access denied.');
+    }
+  });
+
+  /* Stop recording */
+  stopBtn.addEventListener('click', () => {
+    mediaRecorder.stop();
+  });
+
+  /* Upload / execute */
+  async function uploadRecording(rec) {
+    const fd = new FormData();
+    fd.append('audio', rec.blob, `${rec.name || 'recording'}.webm`);
+    try {
+      // Step 1: Get transcription
+      const res = await fetch('/voice-to-prompt', { method: 'POST', body: fd });
+      const json = await res.json();
+      if (!res.ok) {
+        console.error(json.error || 'Server error');
+        return;
+      }
+
+      // Update recording with transcription
+      rec.transcription = json.transcription;
+
+      // Step 2: Get speech response
+      const res2 = await fetch('/respond-to-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transcription: json.transcription })
+      });
+
+      if (!res2.ok) {
+        const errorJson = await res2.json();
+        console.error(errorJson.error || 'Server error');
+        return;
+      }
+
+      // Create blob from response and set URL
+      const responseBlob = await res2.blob();
+      rec.responseUrl = URL.createObjectURL(responseBlob);
+
+      // Get metadata and set image URL
+      const metadata = JSON.parse(res2.headers.get('X-Metadata'));
+      rec.imageUrl = "/static/outputs/"+metadata.imageUrl;
+      
+      // Update UI
+      renderList();
+
+      // Auto-play response audio
+      const audioElement = listBox.querySelector(`audio[src="${rec.responseUrl}"]`);
+      if (audioElement) {
+        audioElement.play();
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  /* Voice-to-prompt button */
+  document.getElementById("voice-to-prompt").addEventListener("click", async () => {
+    if (recordings.length === 0) {
+      console.error('No recordings available. Please record audio first.');
+      return;
+    }
+    const latestRecording = recordings[recordings.length - 1];
+    await uploadRecording(latestRecording);
+  });
+
+  /* Draw object button */
+  document.getElementById("draw-object").addEventListener("click", async () => {
+
+    console.log("Drawing object")
+    try {
+      const response = await fetch('/draw-object', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to draw object');
+      }
+
+      const data = await response.json();
+      console.log('Drawing completed:', data);
+      
+      // If the response includes an image URL, update the latest recording
+      if (recordings.length > 0 && data.imageUrl) {
+        const latestRecording = recordings[recordings.length - 1];
+        latestRecording.imageUrl = "/static/outputs/" + data.imageUrl;
+        renderList();
+      }
+    } catch (error) {
+      console.error('Error drawing object:', error);
+      alert('Failed to draw object. Please try again.');
+    }
+  });
+  </script>
+</body>
+</html>

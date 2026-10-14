@@ -1,0 +1,54 @@
+[
+  {
+    "time_s": 1.2988453329999174,
+    "text": "Path data ranges (input units): X=124.22, Y=107.03"
+  },
+  {
+    "time_s": 1.2988537500004895,
+    "text": "To make the drawing 15.0cm wide, the suggested scale factor is: 0.12"
+  },
+  {
+    "time_s": 1.2988652499998352,
+    "text": "Actual drawing size: 10 cm on the longest dimension"
+  },
+  {
+    "time_s": 1.2990022909998515,
+    "text": "1 paths, 7 points; output: /Users/wangqibo/cs3.1/multimedia/robot2/lerobot-draws-main/outputs/triangle"
+  },
+  {
+    "time_s": 5.152478375000101,
+    "text": "Moving to start of path: {'x': np.float64(7.9245283018867925), 'y': np.float64(12.075471698113207), 'z': 5.0, 'rx': 0, 'ry': 0, 'rz': 0, 'open': 0.5}"
+  },
+  {
+    "time_s": 7.862280874999669,
+    "text": "Step 1/7 -> {'x': np.float64(7.9245283018867925), 'y': np.float64(12.075471698113207), 'z': 2.0, 'rx': 0, 'ry': 0, 'rz': 0, 'open': 0.5}"
+  },
+  {
+    "time_s": 9.07504599999993,
+    "text": "Step 2/7 -> {'x': np.float64(3.050314465408805), 'y': np.float64(3.6163522012578615), 'z': 2.0, 'rx': 0, 'ry': 0, 'rz': 0, 'open': 0.5}"
+  },
+  {
+    "time_s": 10.276177040999755,
+    "text": "Step 3/7 -> {'x': np.float64(3.144654088050314), 'y': np.float64(3.4591194968553456), 'z': 2.0, 'rx': 0, 'ry': 0, 'rz': 0, 'open': 0.5}"
+  },
+  {
+    "time_s": 11.474912624999888,
+    "text": "Step 4/7 -> {'x': np.float64(12.955974842767295), 'y': np.float64(3.4591194968553456), 'z': 2.0, 'rx': 0, 'ry': 0, 'rz': 0, 'open': 0.5}"
+  },
+  {
+    "time_s": 12.687298957999701,
+    "text": "Step 5/7 -> {'x': np.float64(13.050314465408805), 'y': np.float64(3.5534591194968552), 'z': 2.0, 'rx': 0, 'ry': 0, 'rz': 0, 'open': 0.5}"
+  },
+  {
+    "time_s": 13.879930000000058,
+    "text": "Step 6/7 -> {'x': np.float64(8.176100628930817), 'y': np.float64(12.075471698113207), 'z': 2.0, 'rx': 0, 'ry': 0, 'rz': 0, 'open': 0.5}"
+  },
+  {
+    "time_s": 15.0746532080002,
+    "text": "Step 7/7 -> {'x': np.float64(7.987421383647798), 'y': np.float64(12.075471698113207), 'z': 2.0, 'rx': 0, 'ry': 0, 'rz': 0, 'open': 0.5}"
+  },
+  {
+    "time_s": 16.2942070830004,
+    "text": "Original Phospho command sequence completed."
+  }
+]

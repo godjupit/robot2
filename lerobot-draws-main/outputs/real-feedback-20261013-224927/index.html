@@ -1,0 +1,5 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>真机关节反馈回放</title>
+<style>body{font:16px system-ui;max-width:1200px;margin:30px auto;padding:0 20px;background:#f6f8fa}img{width:100%}p{line-height:1.7}</style>
+<h1>10 cm 三角形：真机关节反馈回放</h1><p>蓝色机械臂由真机实际返回的关节角度驱动，没有重新求解 IK。绿色是真实关节反馈换算出的模型末端轨迹。右下是模型末端高度。</p>
+<img src="replay.gif"><p>数据来自本次执行期间的 /joints/read。显示的是 URDF 末端参考点；笔的长度和安装未测量，不能把它称为实测笔尖轨迹。动画只选取已采集帧，不插入理想中间点。</p>
+<p><a href="feedback.jsonl">原始反馈</a> · <a href="report.json">采集报告</a> · <a href="execution.log">执行日志</a></p></html>

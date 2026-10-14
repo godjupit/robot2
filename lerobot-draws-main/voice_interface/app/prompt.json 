@@ -1,0 +1,14 @@
+{
+  "body_parts" : {
+    "nose": {
+      "nose_2.1": {
+        "episode": "21",
+        "description": "This a nose"
+      }
+      "nose_2.2": {
+        "episode": "21",
+        "description": "This a nose which has edges"
+      }
+    }
+  }
+}

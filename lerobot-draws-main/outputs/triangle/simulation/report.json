@@ -1,0 +1,15 @@
+{
+  "preview_only": true,
+  "motion_sent": false,
+  "solver": "Independent SciPy IK using the Phospho SO100 URDF; not the Phospho PyBullet solver",
+  "initial_model_position_cm": [
+    29.87751890840475,
+    0.0,
+    23.85239598581266
+  ],
+  "drawing_model_z_cm": 25.85239598581266,
+  "frames": 124,
+  "max_model_position_error_mm": 70.46694513040038,
+  "pen_tip_measured": false,
+  "collision_checked": false
+}

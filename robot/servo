@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PYTHON=${ROBOT_PYTHON:-/Users/wangqibo/cs3.1/multimedia/robot/.venv/bin/python}
+exec "$PYTHON" "$SCRIPT_DIR/servo.py" "$@"
