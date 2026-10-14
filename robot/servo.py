@@ -141,8 +141,171 @@ class Client:
     def initialize(self, timeout):
         return self.call('/move/init', {}, timeout=timeout)
 
+    def write_base(self, angle):
+        # 原生接口在 angles 长度为 1 且省略 joints_ids 时，仅写第一个舵机。
+        self.call('/joints/write', {'unit': 'rad', 'angles': [math.radians(angle)]})
+
     def close(self):
         self.session.close()
+
+
+def base_step_to(client, target=45., timeout=120., interval=.5):
+    """仅底座：发送目标每次调整 1°，按真实反馈判断到位，补偿最多 5°。"""
+    initial = client.read()
+    command = initial[0]
+    started = time.monotonic()
+    stable = stalled = 0
+    previous = initial[0]
+    rows = []
+    log_file = Path(__file__).resolve().parent/'垃圾文件夹/logs'/f'base-step-{datetime.now(ZoneInfo("Asia/Shanghai")):%Y%m%d-%H%M%S-%f}.json'
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    result = {'target_deg': target, 'step_deg': 1, 'initial_angles': initial,
+              'samples': rows, 'status': 'running'}
+    log_file.write_text(json.dumps(result, ensure_ascii=False, indent=2)+'\n')
+    print(f'实验日志：{log_file}', flush=True)
+    try:
+        for index in range(240):
+            if time.monotonic()-started >= timeout:
+                raise RuntimeError('底座实验总超时')
+            actual = client.read()
+            error = target-actual[0]
+            rows.append({'time_s': time.monotonic()-started, 'command_deg': command,
+                         'actual_angles': actual.copy(), 'error_deg': error})
+            print(f'{index:03d}: 最近发送 {command:.2f}°，实测 {actual[0]:.2f}°，距 {target:g}° 差 {error:+.2f}°', flush=True)
+            if max(abs(a-b) for a,b in zip(actual[1:],initial[1:])) > 3:
+                raise RuntimeError('其他关节偏移超过 3°，停止底座实验')
+            stable = stable+1 if abs(error) <= .5 else 0
+            if stable >= 3:
+                result['status'] = 'completed'
+                result['final_command_deg'] = command
+                result['final_actual_deg'] = actual[0]
+                print(f'底座实测连续三次接近 {target:g}°（误差≤0.5°）；保留最近目标 {command:.2f}°。', flush=True)
+                return result
+            if abs(error) > .5:
+                stalled = stalled+1 if index and abs(actual[0]-previous) < .1 else 0
+                if stalled >= 8:
+                    raise RuntimeError('底座连续 8 次反馈几乎未变化，停止累加目标')
+                proposed = command + (1 if error > 0 else -1)
+                if not min(initial[0],target)-5 <= proposed <= max(initial[0],target)+5:
+                    raise RuntimeError('目标补偿超过 5°，停止累加')
+                if abs(proposed-actual[0]) > 5:
+                    raise RuntimeError('发送角度与真实角度相差超过 5°，停止累加')
+                client.write_base(proposed)
+                command = proposed
+            previous = actual[0]
+            time.sleep(interval)
+        raise RuntimeError('底座实验达到最大循环次数')
+    except BaseException as exc:
+        result['status'] = 'stopped'
+        result['reason'] = str(exc) or '用户中断'
+        try:
+            hold = client.read()[0]
+            client.write_base(hold)
+            result['hold_requested_deg'] = hold
+        except Exception as hold_error:
+            result['hold_error'] = str(hold_error)
+        raise
+    finally:
+        log_file.write_text(json.dumps(result, ensure_ascii=False, indent=2)+'\n')
+
+
+def initialize_with_feedback(client, config, initial, timeout=60., request_timeout=30.,
+                             tolerance=.5, max_compensation=15., interval=.5):
+    """原生初始化后，以真实反馈为准补偿六轴零位；每次最多修正 1°。"""
+    offsets, signs = config['servos_offsets'], config['servos_offsets_signs']
+    if (len(offsets) != 6 or len(signs) != 6
+            or any(not math.isfinite(v) or not 0 <= v <= 4095 for v in offsets)
+            or any(v not in (-1, 1) for v in signs)):
+        raise ValueError('标定参数无效，未开始初始化')
+    started = time.monotonic()
+    deadline = started+timeout
+    command = [0.]*6
+    log_file = Path(__file__).resolve().parent/'垃圾文件夹/logs'/f'init-{datetime.now(ZoneInfo("Asia/Shanghai")):%Y%m%d-%H%M%S-%f}.json'
+    result = {'status': 'planned', 'unit': 'degrees', 'initial_angles': initial.copy(),
+              'desired_angles': [0.]*6, 'tolerance_deg': tolerance,
+              'max_compensation_deg': max_compensation, 'timeout_s': timeout,
+              'samples': [], 'last_command_angles': None}
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_file.write_text(json.dumps(result, ensure_ascii=False, indent=2)+'\n')
+    print(f'初始化补偿日志：{log_file}', flush=True)
+    attempted = False
+    try:
+        attempted = True
+        result['status'] = 'running'
+        client.initialize(min(request_timeout, timeout))
+        result['last_command_angles'] = command.copy()
+        print('原生初始化已返回；开始读取真实反馈，最多每次修正 1°。', flush=True)
+        stable = 0
+        previous = None
+        best = [float('inf')]*6
+        stalled = [0]*6
+        for iteration in range(512):
+            if time.monotonic() >= deadline:
+                raise RuntimeError('初始化补偿超时，未达到真实零位')
+            actual = client.read()
+            result['samples'].append({'time_s': time.monotonic()-started,
+                                      'actual_angles': actual.copy(),
+                                      'command_angles': command.copy()})
+            result['last_actual_angles'] = actual.copy()
+            errors = [abs(v) for v in actual]
+            print(f'补偿 {iteration:03d}：实测 {[round(v,2) for v in actual]}°；'
+                  f'最大零位误差 {max(errors):.2f}°', flush=True)
+            stable = stable+1 if max(errors) <= tolerance else 0
+            if stable >= 3:
+                result['status'] = 'completed'
+                print_angles(initial, [0.]*6, actual, '真实零位连续三次到位；保留补偿目标')
+                print(f'最终发送目标（度）：{[round(v,3) for v in command]}', flush=True)
+                return result
+            proposed = command.copy()
+            for i, error in enumerate(errors):
+                best[i] = min(best[i], error)
+                if error <= tolerance:
+                    stalled[i] = 0
+                    continue
+                if error > best[i]+3:
+                    raise RuntimeError(f'ID{i+1} 误差比此前最好值增大超过 3°，停止补偿')
+                stalled[i] = (stalled[i]+1 if previous is not None
+                              and abs(actual[i]-previous[i]) < .1 else 0)
+                if stalled[i] >= 8:
+                    raise RuntimeError(f'ID{i+1} 连续 8 次反馈几乎不变，停止补偿')
+                proposed[i] += math.copysign(min(1., error), -actual[i])
+                if abs(proposed[i]) > max_compensation+1e-9:
+                    raise RuntimeError(f'ID{i+1} 需要的补偿超过 {max_compensation:g}°，停止补偿')
+                raw = proposed[i]*signs[i]*4095/360+offsets[i]
+                if not -180 <= proposed[i] <= 180 or not 0 <= raw <= 4095:
+                    raise RuntimeError(f'ID{i+1} 补偿目标超出角度/编码器范围')
+            # 先验证所有轴，再一次写入；不改标定或 PID。
+            if proposed != command:
+                client.write(proposed)
+                command = proposed
+                result['last_command_angles'] = command.copy()
+            previous = actual.copy()
+            remaining = deadline-time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError('初始化补偿超时，未达到真实零位')
+            time.sleep(min(interval, remaining))
+        raise RuntimeError('初始化补偿达到最大循环次数')
+    except BaseException as exc:
+        result['status'] = 'stopped'
+        result['reason'] = str(exc) or '用户中断'
+        if result.get('last_actual_angles') is not None:
+            print_angles(initial, [0.]*6, result['last_actual_angles'], '补偿停止前最后反馈')
+        if attempted:
+            try:
+                hold = client.read()
+                client.write(hold)
+                result['hold_requested_angles'] = hold.copy()
+                print('已尝试发送当前反馈位置作为保持目标；未关闭力矩。', file=sys.stderr)
+            except Exception as hold_error:
+                result['hold_error'] = str(hold_error)
+                print(f'保持请求失败：{hold_error}', file=sys.stderr)
+        raise
+    finally:
+        result['elapsed_s'] = time.monotonic()-started
+        try:
+            log_file.write_text(json.dumps(result, ensure_ascii=False, indent=2)+'\n')
+        except OSError as exc:
+            print(f'初始化日志保存失败：{exc}', file=sys.stderr)
 
 
 def main(argv=None):
@@ -154,9 +317,22 @@ def main(argv=None):
     read.add_argument('--ids', type=int, nargs='+', default=list(range(1, 7)))
     xyz = sub.add_parser('xyz', help='读取真机关节并计算当前模型末端 XYZ（cm）')
     xyz.add_argument('--urdf', type=Path, default=DEFAULT_URDF)
-    init = sub.add_parser('init', help='调用 Phosphobot 原生 /move/init，六轴回标定零位')
+    init = sub.add_parser('init', help='原生初始化后，按真实反馈补偿六轴零位')
     init.add_argument('--execute', action='store_true')
-    init.add_argument('--timeout', type=finite, default=30, help='HTTP 请求超时秒数，不是到位判定时间')
+    init.add_argument('--timeout', type=finite, default=60, help='初始化和补偿的总时间上限，秒')
+    init.add_argument('--request-timeout', type=finite, default=30, help='原生初始化 HTTP 请求超时秒数')
+    init.add_argument('--tolerance', type=finite, default=.5, help='真实零位误差，度，连续三次满足')
+    init.add_argument('--max-compensation', type=finite, default=15, help='相对零位的最大补偿目标，度')
+    init.add_argument('--native', action='store_true', help='仅调用原生 /move/init，不做反馈补偿')
+    step = sub.add_parser('base-step', help='实验：底座目标每次调整 1°，实际角度到 45° 停止')
+    step.add_argument('--execute', action='store_true')
+    direct = sub.add_parser('direct', help='一次调用原版 /joints/write，不做 IK 或速度插值')
+    direct.add_argument('--ids', type=int, nargs='+', required=True)
+    direct_target = direct.add_mutually_exclusive_group(required=True)
+    direct_target.add_argument('--angles', type=finite, nargs='+', help='绝对关节角度，度')
+    direct_target.add_argument('--delta', type=finite, nargs='+', help='相对当前角度增量，度')
+    direct.add_argument('--wait', type=finite, default=1, help='发送后等待几秒再读取反馈，默认 1')
+    direct.add_argument('--execute', action='store_true')
     move = sub.add_parser('move', help='按关节角度移动；默认只预览')
     move.add_argument('--ids', type=int, nargs='+', required=True)
     target = move.add_mutually_exclusive_group(required=True)
@@ -182,9 +358,12 @@ def main(argv=None):
     try:
         if args.robot_id < 0:
             raise ValueError('--robot-id 必须非负')
-        if args.command == 'init' and args.timeout <= 0:
-            raise ValueError('--timeout 必须大于 0')
-        if args.command in ('read', 'move'):
+        if args.command == 'init':
+            if args.timeout <= 0 or args.request_timeout <= 0:
+                raise ValueError('timeout 和 request-timeout 必须大于 0')
+            if not .1 <= args.tolerance <= 2 or not 0 <= args.max_compensation <= 20:
+                raise ValueError('tolerance 范围 0.1..2°；max-compensation 范围 0..20°')
+        if args.command in ('read', 'move', 'direct'):
             if len(set(args.ids)) != len(args.ids) or any(i not in range(1, 7) for i in args.ids):
                 raise ValueError('--ids 必须是 1..6 内不重复的 ID')
         if args.command == 'move':
@@ -192,18 +371,39 @@ def main(argv=None):
                 raise ValueError('speed 范围 0.1..90；acc 范围 0.1..150；hz 范围 1..30')
             if args.timeout <= 0 or not .1 <= args.tolerance <= 5 or not .1 <= args.tracking_error <= 15:
                 raise ValueError('timeout 必须大于 0；tolerance 范围 0.1..5；tracking-error 范围 0.1..15')
+        if args.command == 'direct' and not 0 <= args.wait <= 30:
+            raise ValueError('--wait 范围 0..30 秒')
+        if args.command in ('move', 'direct'):
             values = expanded(args.angles if args.angles is not None else args.delta, len(args.ids))
         client = Client(args.url, args.robot_id)
         config = client.precheck()
         current = client.read()
+        if args.command == 'base-step':
+            print(f'底座当前 {current[0]:.2f}°；实际目标 45°；每次发送目标调整 1°；仅写 ID1。')
+            if not args.execute:
+                print('仅预览；加 --execute 才执行。')
+                return 0
+            time.sleep(.3)
+            check = client.read()
+            if max(abs(a-b) for a,b in zip(check,current)) > 1:
+                raise RuntimeError('机械臂当前尚未稳定，未开始底座实验')
+            base_step_to(client)
+            return 0
         if args.command == 'init':
-            print_angles(current, [0.]*6, title='Phosphobot 原生初始化：六轴标定零位，包含夹爪')
+            print_angles(current, [0.]*6, title='Phosphobot 初始化：六轴标定零位，包含夹爪')
+            if not args.native:
+                print(f'原生初始化后按反馈补偿：每次最多 1°，补偿上限 ±{args.max_compensation:g}°，'
+                      f'六轴误差≤{args.tolerance:g}° 连续三次才报告到位。')
             if not args.execute:
                 print('仅预览；未发送初始化、运动或力矩指令。加 --execute 才执行。')
                 return 0
+            if not args.native:
+                initialize_with_feedback(client, config, current, args.timeout,
+                                         args.request_timeout, args.tolerance, args.max_compensation)
+                return 0
             # 完全交给原生接口；不附加关节插值或键盘页面的 open=1 指令。
             try:
-                result = client.initialize(args.timeout)
+                result = client.initialize(min(args.request_timeout, args.timeout))
             except requests.RequestException:
                 print('初始化请求失败或超时；服务端可能已开始运动，HTTP 超时不会取消运动。', file=sys.stderr)
                 raise
@@ -240,6 +440,21 @@ def main(argv=None):
             if not math.isfinite(angle) or not -180 <= angle <= 180 or not 0 <= raw <= 4095:
                 raise ValueError(f'ID{i+1} 目标超出角度/编码器范围')
         print_angles(current, goal)
+        if args.command == 'direct':
+            print('原版 /joints/write：一次发送完整六轴目标，不做 IK 或软件速度规划。')
+            if not args.execute:
+                print('仅预览；未发送运动或力矩指令。加 --execute 才执行。')
+                return 0
+            try:
+                client.write(goal)
+            except requests.RequestException:
+                print('写入请求失败；服务端可能已收到目标，不能据此判断运动已取消。', file=sys.stderr)
+                raise
+            print('写入接口已返回；此响应不代表真机已到位。', flush=True)
+            time.sleep(args.wait)
+            actual = client.read()
+            print_angles(current, goal, actual, f'写入后等待 {args.wait:g} 秒的实际角度反馈')
+            return 0
         dt = 1/args.hz
         frames = trajectory(current, goal, args.speed, args.acc, dt)
         if len(frames)*dt >= args.timeout:
