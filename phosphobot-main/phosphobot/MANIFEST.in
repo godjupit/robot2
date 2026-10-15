@@ -1,2 +1,0 @@
-# include every file under resources/ in your source distribution
-recursive-include resources *

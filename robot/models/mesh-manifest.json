@@ -1,0 +1,30 @@
+[
+  {
+    "file": "so-100/meshes/Base.STL",
+    "sha256": "d65990c6442d887825ac5caf5dd66714b89ecd87084c10a6bc176b5ceb68199e"
+  },
+  {
+    "file": "so-100/meshes/Fixed_Jaw.STL",
+    "sha256": "f2a623117086c3d8c5898b6a6b8cdcbe96d058d93baf670e254bfcbade19dc97"
+  },
+  {
+    "file": "so-100/meshes/Lower_Arm.STL",
+    "sha256": "2925c5b8fcc1681ebf57d1d1759a2a8272a899d91d38b22d4ceb5596b456a259"
+  },
+  {
+    "file": "so-100/meshes/Moving Jaw.STL",
+    "sha256": "aa509ca4273b068885fb2ad44bc6eefa9e439251b53d0089d9b07b89dba71ab5"
+  },
+  {
+    "file": "so-100/meshes/Rotation_Pitch.STL",
+    "sha256": "2a8cfff7006b3821c7083da155614f2e58b7f5fc9eb31eecf28430912d42ae0a"
+  },
+  {
+    "file": "so-100/meshes/Upper_Arm.STL",
+    "sha256": "b808e58ab50186086d0356689b02caf333da2b909e7644ec401e8b991eb8d3ee"
+  },
+  {
+    "file": "so-100/meshes/Wrist_Pitch_Roll.STL",
+    "sha256": "5052ca2a917e1aa77f9e0ccd9876da7815c5ebdd26dc634e9c6056150e8379c4"
+  }
+]

@@ -1,3 +1,11 @@
+先在另一个终端启动本机已安装的控制服务，保持运行：
+
+```bash
+phosphobot run --no-cameras --no-realsense
+```
+
+浏览器打开 http://127.0.0.1:80 ，确认 SO100 已连接并完成标定，再运行下面的命令。如果服务使用其他端口，绘图命令加 `--url http://127.0.0.1:端口`。模型网格已内置在 `models/`，不依赖上游源码目录；Phosphobot 服务仍需单独安装并运行。
+
 ```bash
 cd /Users/wangqibo/cs3.1/multimedia/robot2/robot
 ```

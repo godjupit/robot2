@@ -64,7 +64,7 @@ class Model:
         self.manager = CollisionManager()
         self.geometry = []
         adjacent = {frozenset((j.find('parent').get('link'),j.find('child').get('link'))) for j in self.joints}
-        assets = ROOT.parent/'phosphobot-main/phosphobot/resources/urdf'
+        assets = ROOT/'models'
         for link in self.root.findall('link'):
             for i, collision in enumerate(link.findall('collision')):
                 mesh_info = collision.find('geometry/mesh')
