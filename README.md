@@ -14,4 +14,3 @@ phosphobot run --no-cameras --no-realsense
 
 另开终端运行绘图程序，命令见 [`robot/README.md`](robot/README.md)。默认仅规划预检，加 `--execute` 才发送运动。
 
-当前本机绘图 Python 环境位于 `/Users/wangqibo/cs3.1/multimedia/robot/.venv/`，不包含在本仓库中。Phosphobot 服务也需单独安装，本仓库不包含其安装程序。
