@@ -48,12 +48,17 @@ def build_wang(current, center_x=27., center_y=.199, height=16., width=10.,
         transfer_z=max(previous[2],paper_z+lift)
         above=[start[0],start[1],transfer_z]
         append_to('travel',above,spacing,index,min_z_cm=paper_z+1.)
-        append_to('lower',start,.5,index)
+        hover=[start[0],start[1],paper_z+lift]
+        append_to('hover',hover,.5,index,min_z_cm=paper_z+1.)
+        targets[-1]['landing_ready']=True
+        targets[-1]['arrival_tolerance_mm']=2.
+        append_to('lower',start,.5,index,fixed_xy_cm=start[:2])
         append_to('draw',end,spacing,index)
         append_to('lift',[end[0],end[1],paper_z+lift],.5,index)
         targets[-1]['stroke_finished']=True
     plan['drawing_point_count']=len(plan['drawing_points_cm'])
-    plan['approach_policy']='Raise at current XY, transfer at constant Z, lower at fixed stroke-start XY'
+    plan['require_hover_confirmation']=True
+    plan['approach_policy']='Transfer above stroke start, confirm safe hover, then lower with fixed target XY'
     return plan
 
 

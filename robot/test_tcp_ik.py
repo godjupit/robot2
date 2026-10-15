@@ -201,6 +201,29 @@ class TcpIkTests(unittest.TestCase):
         self.assertTrue(all(a['xyz_cm'][2]>b['xyz_cm'][2] for a,b in zip(lower,lower[1:])))
         self.assertEqual(lower[-1]['xyz_cm'],[34.5,.199,0.])
 
+    def test_each_stroke_confirms_hover_before_fixed_xy_descent(self):
+        from run_wang import build_wang
+        for initial_z in (2.,5.,24.3):
+            p=build_wang([30.,0.,initial_z],center_x=32.,height=5.,width=6.)
+            self.assertTrue(p['require_hover_confirmation'])
+            for stroke_id,stroke in zip(p['stroke_ids'],p['strokes_cm']):
+                targets=[t for t in p['stroke_targets'] if t['stroke_id']==stroke_id]
+                ready=[i for i,t in enumerate(targets) if t.get('landing_ready')]
+                self.assertEqual(len(ready),1)
+                hover=targets[ready[0]]
+                self.assertEqual(hover['phase'],'hover')
+                self.assertEqual(hover['arrival_tolerance_mm'],2.)
+                self.assertEqual(hover['xyz_cm'],stroke[0][:2]+[5.])
+                previous=hover['xyz_cm']
+                for i,t in enumerate(targets):
+                    if t['phase']!='lower': continue
+                    self.assertGreater(i,ready[0])
+                    self.assertEqual(t['xyz_cm'][:2],stroke[0][:2])
+                    self.assertEqual(t['fixed_xy_cm'],stroke[0][:2])
+                    self.assertGreater(previous[2]-t['xyz_cm'][2],0)
+                    self.assertLessEqual(previous[2]-t['xyz_cm'][2],.5+1e-9)
+                    previous=t['xyz_cm']
+
     def test_default_paper_protection_triggers_below_five_mm(self):
         class FakeModel:
             np=np
@@ -218,6 +241,41 @@ class TcpIkTests(unittest.TestCase):
         run(-.0049)
         with self.assertRaisesRegex(RuntimeError,'绘图 Z 高度保护'):
             run(-.0051)
+
+    def test_hover_cannot_arrive_with_normal_ten_mm_tolerance(self):
+        class FakeModel:
+            np=np
+            tcp_mode=True
+            def check(self,*args): pass
+            def position(self,q): return np.array([.005,0.,.05])
+        class Client:
+            def read(self): return [0.]*6
+        rows=[];writes=[]
+        with self.assertRaisesRegex(RuntimeError,'连续 8 次反馈'):
+            move_point_with_compensation(Client(),FakeModel(),
+                {'phase':'hover','joint_angles_deg':[1.]*5,'xyz_cm':[0.,0.,5.],
+                 'arrival_tolerance_mm':2.},np.zeros(5),writes.append,rows.append,
+                time.monotonic()+5,interval=0,xyz_tolerance_mm=10)
+        self.assertTrue(writes)  # 5 mm 偏差必须继续补偿，不能提前到位。
+        self.assertTrue(all(r['arrival_tolerance_mm']==2. for r in rows))
+
+    def test_execution_rejects_lower_without_hover_confirmation(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from plan import execute_plan
+        initial=[3.,0.,0.,0.,0.,115.]
+        class Client:
+            def read(self): return initial.copy()
+            def call(self,*args,**kwargs): raise AssertionError('不应发送运动')
+        p={'source_joint_angles_deg':initial,'require_hover_confirmation':True,
+           'solutions':[{'phase':'lower','stroke_id':1,'xyz_cm':[32.,0.,0.],
+                         'fixed_xy_cm':[32.,0.],'joint_angles_deg':initial[:5]}]}
+        with tempfile.TemporaryDirectory() as folder, patch('plan.save_execution_preview'), \
+                patch('plan.move_point_with_compensation') as move:
+            with self.assertRaisesRegex(RuntimeError,'悬停尚未确认'):
+                execute_plan(Client(),self.model,p,{},Path(folder)/'planning.json')
+            move.assert_not_called()
 
     def test_execution_passes_saved_half_degree_steps_to_controller(self):
         import tempfile

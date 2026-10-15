@@ -166,6 +166,10 @@ def solve_plan(plan, model=None):
     if plan.get('stroke_targets'):
         targets=[(p['phase'],p['xyz_cm']) for p in plan['stroke_targets']]
     for index,(phase,point) in enumerate(targets):
+        if plan.get('stroke_targets'):
+            metadata=plan['stroke_targets'][index]
+            if 'fixed_xy_cm' in metadata and not np.allclose(point[:2],metadata['fixed_xy_cm'],atol=1e-9,rtol=0):
+                raise ValueError('落笔目标 X、Y 必须保持为笔画起点坐标')
         target = np.asarray(point)/100
         seed = q.copy()
         q = model.solve_position(target,seed)
@@ -244,6 +248,10 @@ def move_point_with_compensation(client, model, point, command, write_arm, recor
     np = model.np
     goal = np.asarray(point['joint_angles_deg'],dtype=float)
     goal_xyz = np.asarray(point['xyz_cm'],dtype=float)
+    # 落笔前必经点使用独立的小容差，不能被普通路径的 10 mm 容差提前放行。
+    arrival_tolerance_mm=min(xyz_tolerance_mm,point.get('arrival_tolerance_mm',xyz_tolerance_mm))
+    if not math.isfinite(arrival_tolerance_mm) or arrival_tolerance_mm <= 0:
+        raise ValueError('目标点到位容差必须为有限正数')
     command = np.asarray(command,dtype=float).copy()
     first = np.asarray(client.read()[:5])
     lower_command = np.minimum(first,goal)-max_compensation
@@ -264,7 +272,8 @@ def move_point_with_compensation(client, model, point, command, write_arm, recor
                   'goal_joint_angles_deg':goal.tolist(),'goal_xyz_cm':goal_xyz.tolist(),
                   'last_command_angles_deg':command.tolist(),
                   'joint_errors_deg':error.tolist(),'max_joint_error_deg':float(max(abs(error))),
-                  'position_error_mm':position_error_mm}
+                  'position_error_mm':position_error_mm,
+                  'arrival_tolerance_mm':arrival_tolerance_mm}
         if getattr(client,'last_ticks',None) is not None:
             sample['motor_position_units']=client.last_ticks.copy()
         if model.tcp_mode and point['phase'] in ('draw','lower'):
@@ -282,7 +291,7 @@ def move_point_with_compensation(client, model, point, command, write_arm, recor
             raise RuntimeError(f'抬笔转移高度保护：TCP Z={xyz[2]:.4f} cm，低于要求 {point["min_z_cm"]:g} cm，停止整条轨迹')
         # TCP 绘图只要求尖端 XYZ；回零仍要求五轴角度到位。
         position_only = model.tcp_mode and point['phase'] != 'home'
-        arrived = position_error_mm <= xyz_tolerance_mm and (position_only or max(abs(error)) <= joint_tolerance)
+        arrived = position_error_mm <= arrival_tolerance_mm and (position_only or max(abs(error)) <= joint_tolerance)
         stable = stable+1 if arrived else 0
         if stable >= 2:
             return command,sample
@@ -302,7 +311,7 @@ def move_point_with_compensation(client, model, point, command, write_arm, recor
         if unchanged >= 8:
             raise RuntimeError('连续 8 次反馈未变化且未到位，停止补偿')
         # 只根据实际残差调整，不把“发送成功”当成到位。
-        mask = abs(error) > (.1 if position_error_mm > xyz_tolerance_mm else joint_tolerance)
+        mask = abs(error) > (.1 if position_error_mm > arrival_tolerance_mm else joint_tolerance)
         if model.tcp_mode and point['phase'] in ('draw','lower'):
             proposed,choice=choose_drawing_compensation(model,actual,command,error,goal_xyz,mask,paper_z,step_deg,shoulder_step_deg,elbow_step_deg,z_below_tolerance_mm)
             sample['compensation_choice']=choice
@@ -399,11 +408,22 @@ def execute_plan(client, model, plan, config, destination, joint_tolerance=2.,
             if choice is not None:
                 entry['compensation_choice']=choice.copy()
         result['commands'].append(entry)
+    ready_stroke=None
+    ready_xy=None
     try:
         for index,point in enumerate(plan['solutions']):
+            if plan.get('require_hover_confirmation') and point['phase']=='lower':
+                if ready_stroke != point.get('stroke_id') or ready_stroke is None:
+                    raise RuntimeError('起点上方悬停尚未确认，禁止落笔')
+                if (len(point.get('fixed_xy_cm',[]))!=2
+                        or not np.allclose(point['xyz_cm'][:2],ready_xy,atol=1e-9,rtol=0)
+                        or not np.allclose(point['fixed_xy_cm'],ready_xy,atol=1e-9,rtol=0)):
+                    raise RuntimeError('落笔目标 X、Y 偏离笔画起点，停止轨迹')
             print(f'目标 {index+1}/{len(plan["solutions"])}: XYZ={np.round(point["xyz_cm"],3).tolist()} cm；'
                   f'规划角度={np.round(point["joint_angles_deg"],2).tolist()}°；'
                   f'阶段={point["phase"]}'+(f'，第 {point["stroke_id"]} 笔' if 'stroke_id' in point else ''),flush=True)
+            if point.get('landing_ready'):
+                print(f'  落笔前必经点：需 XYZ 误差 ≤{min(xyz_tolerance_mm,point.get("arrival_tolerance_mm",xyz_tolerance_mm)):g} mm，连续两次反馈确认后才允许下降。',flush=True)
             def record(sample):
                 row={'time_s':time.monotonic()-started,'point':index+1,'phase':point['phase'],**sample}
                 if 'stroke_id' in point:
@@ -419,7 +439,14 @@ def execute_plan(client, model, plan, config, destination, joint_tolerance=2.,
                 paper_z_cm=plan.get('drawing_z_protection',{}).get('paper_z_cm'),
                 z_below_tolerance_mm=plan.get('drawing_z_protection',{}).get('z_below_tolerance_mm',5.))
             result['completed_points']=index+1
+            if point.get('landing_ready'):
+                if point['phase']!='hover':
+                    raise RuntimeError('落笔确认必须来自 hover 阶段')
+                ready_stroke=point['stroke_id']
+                ready_xy=point['xyz_cm'][:2]
+                print(f'  第 {ready_stroke} 笔起点上方已连续两次反馈到位，开始固定目标 XY 落笔。',flush=True)
             if point.get('stroke_finished'):
+                ready_stroke=None
                 result['completed_strokes']+=1
                 print(f'第 {point["stroke_id"]} 笔完成并抬笔到位。',flush=True)
             if point['phase']=='draw' and math.dist(point['xyz_cm'],plan['line_end_cm']) < 1e-8:
