@@ -174,3 +174,33 @@ TCP 绘图段独立检查纸面高度：`--paper-z-cm` 默认取路径高度，`
 ./servo --help
 ./servo move --help
 ```
+
+## MuJoCo 离线看“王”字
+
+入口 `simulate_wang.py` 直接读取保存的规划和关节反馈，不连接控制服务。默认使用 `wang-20261014-221245-412748`：高 5 cm、宽 6 cm、中心 X=32 cm、笔长 15 cm；这不是 `run_wang.py` 的默认尺寸。
+
+```bash
+cd /Users/wangqibo/cs3.1/multimedia/robot2/robot
+# 生成两段视频、对比图、误差数据
+/Users/wangqibo/cs3.1/multimedia/robot/.venv/bin/python simulate_wang.py
+# 打开交互式 MuJoCo：鼠标旋转/缩放，空格暂停，R 从头播放
+/Users/wangqibo/cs3.1/multimedia/robot/.venv/bin/mjpython simulate_wang.py --no-video --view ideal
+# 回放这次真实关节反馈（只到记录停止的位置）
+/Users/wangqibo/cs3.1/multimedia/robot/.venv/bin/mjpython simulate_wang.py --no-video --view feedback
+# 查看其他已求解的王字记录；自动读取同目录 actual_feedback.jsonl
+/Users/wangqibo/cs3.1/multimedia/robot/.venv/bin/python simulate_wang.py --plan 垃圾文件夹/plans/另一条王字记录/planning.json --output simulation/another
+```
+
+输出在 `simulation/wang/`：`ideal.mp4` 是完整求解的关节插值回放，`feedback.mp4` 是历史反馈回放，`comparison.png` 比较绘图段，`metrics.json` 保存统计，`scene.xml` 是可加载的 MuJoCo 模型。蓝线为目标，红线为笔尖轨迹，橙色杆为工具。播放经过压缩，不反映真实速度；两种曲线采样率不同，横轴不能按时间逐点对齐。
+
+模型来自本目录 URDF，保留求解器的底座旋转和 Fixed_Jaw TCP 偏移，并交叉核对 MuJoCo 与原求解器正运动学。当前是 MuJoCo **运动学回放**，不含舵机动力学、间隙、工具挠曲、纸面接触或碰撞判定；历史反馈经过模型变换也不等同于实测笔尖。需要测量这些参数后，才适合进一步做动力学误差仿真。
+
+本次结果：理想绘图段到目标笔画的最大距离约 0.049 mm；历史反馈只画到第一横，模型笔尖到目标线 RMS 约 8.96 mm，最大约 9.86 mm，模型高度在纸面上方 5.13–7.13 mm。之后悬停未到位，因反馈连续不变停止，不能据此说真机完成了整个字。
+
+优先检查：
+
+1. 这次日志的 XYZ 到位容差是 10 mm，允许明显偏离笔画就进入下一点。先离线比较更严格的到位标准，再定位控制器为什么不能继续收敛；只缩小容差可能更频繁停机。
+2. 实测笔尖偏移、纸面高度及关节零点。若当时实际笔已经接触纸，但模型显示高出 5–7 mm，需优先核对标定，不能直接按模型高度继续下压。
+3. 把悬停停滞时的发送角度与反馈角度逐轴比较，再判断需要处理的是反馈分辨率、静摩擦、补偿逻辑还是负载。现有回放不能单独确定机械原因。
+
+MuJoCo macOS 交互窗口需用 `mjpython`：https://mujoco.readthedocs.io/en/latest/python.html#passive-viewer

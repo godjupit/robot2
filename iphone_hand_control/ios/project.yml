@@ -1,0 +1,26 @@
+name: HandControl
+options:
+  bundleIdPrefix: local.so100
+  deploymentTarget:
+    iOS: '17.0'
+targets:
+  HandControl:
+    type: application
+    platform: iOS
+    sources: [HandControl]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: local.so100.HandControl
+        SWIFT_VERSION: '5.0'
+        TARGETED_DEVICE_FAMILY: '1'
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_NSCameraUsageDescription: 使用前置相机和深度图追踪手部位置
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: 向同一局域网的电脑发送手部位置
+    info:
+      path: HandControl/Info.plist
+      properties:
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationLandscapeRight]
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSAllowsArbitraryLoads: true

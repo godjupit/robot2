@@ -1,0 +1,26 @@
+{
+  "source_plan": "/Users/wangqibo/cs3.1/multimedia/robot2/robot/垃圾文件夹/plans/wang-20261014-221245-412748/planning.json",
+  "replay_type": "kinematic; no servo/contact dynamics",
+  "fk_crosscheck_max_mm": 3.3307142486596304e-13,
+  "Ideal IK": {
+    "draw_samples": 152,
+    "line_distance_rms_mm": 0.026330319632615392,
+    "line_distance_max_mm": 0.049249471336734185,
+    "z_min_mm": -0.0029158096495895958,
+    "z_max_mm": 0.009231780461471661
+  },
+  "Recorded joints FK": {
+    "draw_samples": 28,
+    "line_distance_rms_mm": 8.964741874746789,
+    "line_distance_max_mm": 9.859876580700773,
+    "z_min_mm": 5.12625551720744,
+    "z_max_mm": 7.1295515958090245
+  },
+  "recorded_execution": {
+    "status": "stopped",
+    "reason": "连续 8 次反馈未变化且未到位，停止补偿",
+    "completed_points": 70,
+    "completed_strokes": 0,
+    "arrival_xyz_tolerance_mm": 10.0
+  }
+}
